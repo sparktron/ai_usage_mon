@@ -208,7 +208,9 @@ class App:
 
     async def run(self) -> None:
         self.cache.prune_older_than(30)
-        await asyncio.to_thread(self.service.seed_if_empty)
+        # Seeding touches the cache, so it must run on this (the connection's)
+        # thread. It only runs once at startup, before the live display.
+        self.service.seed_if_empty()
         with raw_terminal(), Live(
             console=self.console, screen=True, auto_refresh=True,
             refresh_per_second=4, transient=True
