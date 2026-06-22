@@ -57,9 +57,26 @@ def _parse_date(value: str) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
+def _input_total(d: dict) -> int:
+    """Total input tokens including cache. ccusage reports ``inputTokens``
+    exclusive of cache reads/creates, so add them back for a usage figure
+    consistent with the API path."""
+    return (
+        int(d.get("inputTokens", 0) or 0)
+        + int(d.get("cacheReadTokens", 0) or 0)
+        + int(d.get("cacheCreationTokens", 0) or 0)
+    )
+
+
 def _records_from_entry(entry: dict) -> list[UsageRecord]:
     """Convert one daily entry (with optional model breakdown) to records."""
-    date_str = entry.get("date") or entry.get("timestamp") or entry.get("day")
+    # ccusage uses "period"; older/other shapes use "date"/"timestamp"/"day".
+    date_str = (
+        entry.get("period")
+        or entry.get("date")
+        or entry.get("timestamp")
+        or entry.get("day")
+    )
     if not date_str:
         return []
     ts = _parse_date(str(date_str))
@@ -75,7 +92,7 @@ def _records_from_entry(entry: dict) -> list[UsageRecord]:
             UsageRecord(
                 timestamp=ts,
                 model=model,
-                input_tokens=int(item.get("inputTokens", 0) or 0),
+                input_tokens=_input_total(item),
                 output_tokens=int(item.get("outputTokens", 0) or 0),
                 cost=float(item.get("cost", 0.0) or 0.0),
             )
@@ -89,7 +106,7 @@ def _records_from_entry(entry: dict) -> list[UsageRecord]:
             UsageRecord(
                 timestamp=ts,
                 model=str(model),
-                input_tokens=int(entry.get("inputTokens", 0) or 0),
+                input_tokens=_input_total(entry),
                 output_tokens=int(entry.get("outputTokens", 0) or 0),
                 cost=float(entry.get("totalCost", entry.get("cost", 0.0)) or 0.0),
             )

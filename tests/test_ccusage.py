@@ -6,6 +6,59 @@ from usage_monitor import ccusage_fallback as cc
 from usage_monitor.models import Provider
 
 
+def test_parse_real_ccusage_schema():
+    """Mirrors actual `ccusage daily --json` output (v20): the date field is
+    `period`, and input tokens are reported exclusive of cache tokens."""
+    raw = json.dumps(
+        {
+            "daily": [
+                {
+                    "period": "2026-06-22",
+                    "inputTokens": 1544,
+                    "cacheReadTokens": 7194923,
+                    "cacheCreationTokens": 389564,
+                    "outputTokens": 157507,
+                    "totalCost": 5.78,
+                    "modelBreakdowns": [
+                        {
+                            "modelName": "claude-sonnet-4-6",
+                            "inputTokens": 109,
+                            "cacheReadTokens": 5499109,
+                            "cacheCreationTokens": 248791,
+                            "outputTokens": 150702,
+                            "cost": 5.40,
+                        },
+                        {
+                            "modelName": "gpt-5.3-codex",
+                            "inputTokens": 68063,
+                            "cacheReadTokens": 462592,
+                            "cacheCreationTokens": 0,
+                            "outputTokens": 26934,
+                            "cost": 0.577,
+                        },
+                    ],
+                }
+            ]
+        }
+    )
+    records = cc.parse_ccusage_json(raw)
+    assert len(records) == 2
+    sonnet = records[0]
+    assert sonnet.timestamp.date().isoformat() == "2026-06-22"
+    # input must include cache: 109 + 5,499,109 + 248,791
+    assert sonnet.input_tokens == 5_748_009
+    assert sonnet.provider == Provider.CLAUDE
+    assert records[1].provider == Provider.CODEX
+    assert records[1].input_tokens == 530_655  # 68,063 + 462,592
+
+
+def test_input_total_helper():
+    assert cc._input_total(
+        {"inputTokens": 10, "cacheReadTokens": 5, "cacheCreationTokens": 2}
+    ) == 17
+    assert cc._input_total({"inputTokens": 3}) == 3
+
+
 def test_parse_with_model_breakdowns():
     raw = json.dumps(
         {
