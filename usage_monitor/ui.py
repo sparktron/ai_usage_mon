@@ -13,6 +13,7 @@ from rich.text import Text
 
 from .config import Config
 from .models import Bucket, Provider, UsageSummary
+from .oauth_usage import LimitWindow
 
 VIEWS = ("dashboard", "weekly", "hourly", "raw")
 
@@ -36,6 +37,10 @@ class UsageState:
     last_error: str | None = None
     source: str = "—"
     next_refresh_in: int = 0
+    # Official Anthropic plan usage windows (Path A-lite).
+    windows: list[LimitWindow] = field(default_factory=list)
+    plan: str | None = None
+    windows_error: str | None = None
 
 
 def color_for_pct(pct: float) -> str:
@@ -45,6 +50,55 @@ def color_for_pct(pct: float) -> str:
     if pct <= 80:
         return "yellow"
     return "red"
+
+
+def fmt_reset(window: LimitWindow, now: datetime | None = None) -> str:
+    """Format a window's reset as a countdown (<24h) or a local day/time."""
+    secs = window.resets_in_seconds(now)
+    if secs is None:
+        return "reset time unknown"
+    if secs < 24 * 3600:
+        h, m = divmod(secs // 60, 60)
+        return f"Resets in {h}h {m:02d}m" if h else f"Resets in {m}m"
+    # Show the local weekday + time, like the official panel ("Wed 5:59 PM").
+    local = window.resets_at.astimezone()
+    return f"Resets {local:%a} {local:%-I:%M %p}"
+
+
+def _bar(pct: float, width: int = 24) -> Text:
+    """A colored progress bar like the official usage panel."""
+    pct = max(0.0, min(100.0, pct))
+    filled = round(pct / 100 * width)
+    color = color_for_pct(pct)
+    bar = Text()
+    bar.append("█" * filled, style=color)
+    bar.append("░" * (width - filled), style="grey37")
+    return bar
+
+
+def render_windows(state: UsageState) -> RenderableType:
+    """The headline panel: official 5-hour + weekly plan usage windows."""
+    plan = f" · {state.plan.title()}" if state.plan else ""
+    if state.windows_error:
+        body: RenderableType = Text(state.windows_error, style="yellow")
+    elif not state.windows:
+        body = Text("Waiting for usage data…", style="dim")
+    else:
+        table = Table.grid(padding=(0, 2))
+        table.add_column(justify="left", no_wrap=True)   # label
+        table.add_column(justify="left")                  # bar
+        table.add_column(justify="right", no_wrap=True)   # pct
+        table.add_column(justify="right", no_wrap=True)   # reset
+        for w in state.windows:
+            color = color_for_pct(w.utilization)
+            table.add_row(
+                Text(w.label, style="bold"),
+                _bar(w.utilization),
+                Text(f"{w.utilization:.0f}% used", style=color),
+                Text(fmt_reset(w), style="cyan"),
+            )
+        body = table
+    return Panel(body, title=f"Plan usage limits{plan}", border_style="bright_blue")
 
 
 def _fmt_tokens(n: int) -> str:
@@ -113,7 +167,13 @@ def render_dashboard(state: UsageState, config: Config) -> RenderableType:
     grid.add_column(ratio=1)
     grid.add_column(ratio=1)
     grid.add_row(week, hour)
-    return grid
+    # Lead with the official plan-limit windows; the token panels are
+    # supplementary context below them.
+    return Group(
+        render_windows(state),
+        Text("Token throughput (from ccusage):", style="dim"),
+        grid,
+    )
 
 
 def _bucket_table(title: str, buckets: list[Bucket], cost_cap_each: float) -> Table:

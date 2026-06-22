@@ -55,6 +55,10 @@ class Config(BaseSettings):
     # Paths (stringified so JSON config is straightforward).
     db_path: Path = Field(default_factory=default_db_path)
     log_path: Path = Field(default_factory=default_log_path)
+    # Claude Code OAuth credentials (read-only) for official plan-limit windows.
+    credentials_path: Path = Field(
+        default_factory=lambda: Path.home() / ".claude" / ".credentials.json"
+    )
 
     @property
     def effective_hourly_cost_cap(self) -> float:

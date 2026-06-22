@@ -16,11 +16,12 @@ from datetime import datetime, timedelta, timezone
 from rich.console import Console
 from rich.live import Live
 
-from . import ccusage_fallback
+from . import ccusage_fallback, oauth_usage
 from .api import AnthropicUsageClient, ApiError
 from .cache import Cache
 from .config import Config
 from .models import UsageRecord
+from .oauth_usage import LimitWindow, OAuthUsageError, TokenExpired
 from .ui import UsageState, VIEWS, render
 
 log = logging.getLogger("usage_monitor.app")
@@ -49,6 +50,31 @@ class DataService:
         self.last_error: str | None = None
         self.source: str = "—"
         self.last_updated: datetime | None = None
+        # Official plan-limit windows (Path A-lite).
+        self.windows: list[LimitWindow] = []
+        self.plan: str | None = None
+        self.windows_error: str | None = None
+
+    async def _fetch_windows(self) -> None:
+        """Fetch the official 5h/weekly plan-limit windows (read-only token).
+        Failures are captured into windows_error, not raised, and never clear
+        the last-known windows."""
+        try:
+            windows = await asyncio.to_thread(
+                oauth_usage.fetch_usage, self.config.credentials_path
+            )
+            self.windows = windows
+            self.plan = oauth_usage.read_plan(self.config.credentials_path)
+            self.windows_error = None
+        except TokenExpired:
+            self.windows_error = (
+                "Claude session token expired — run any Claude Code command to "
+                "refresh it, then this updates automatically."
+            )
+            log.info("oauth usage: token expired")
+        except OAuthUsageError as exc:
+            self.windows_error = f"Plan usage unavailable: {exc}"
+            log.warning("oauth usage failed: %s", exc)
 
     async def _fetch_records(self) -> tuple[list[UsageRecord], str]:
         """Try the API first, then ccusage. Returns (records, source)."""
@@ -71,6 +97,9 @@ class DataService:
 
     async def refresh(self) -> None:
         """Fetch the latest data and store it. Errors are captured, not raised."""
+        # The official plan-limit windows are the headline; fetch them first
+        # and independently so a ccusage hiccup can't hide them (or vice versa).
+        await self._fetch_windows()
         try:
             records, source = await self._fetch_records()
             if records:
@@ -112,6 +141,9 @@ class DataService:
             last_error=self.last_error,
             source=self.source,
             next_refresh_in=next_refresh_in,
+            windows=self.windows,
+            plan=self.plan,
+            windows_error=self.windows_error,
         )
 
 
