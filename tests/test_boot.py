@@ -133,4 +133,5 @@ def test_boot_paints_dashboard(tmp_path):
     """A successful boot should have painted the dashboard frame."""
     survived, _, output = boot_app_in_pty(str(tmp_path / "boot3.db"), use_ccusage=True)
     assert survived
-    assert "USAGE MONITOR" in output, output[-1500:]
+    # The header title is letter-spaced for the panel chrome.
+    assert "U S A G E   M O N I T O R" in output, output[-1500:]

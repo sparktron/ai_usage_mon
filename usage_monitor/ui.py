@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from rich import box
 from rich.console import Group, RenderableType
 from rich.panel import Panel
 from rich.table import Table
@@ -16,6 +17,19 @@ from .models import Bucket, Provider, UsageSummary
 from .oauth_usage import LimitWindow
 
 VIEWS = ("dashboard", "weekly", "hourly", "raw")
+
+# A muted palette so the chrome recedes and the numbers stand out.
+BORDER = "grey37"          # subtle rounded panel/table outlines
+TITLE_STYLE = "bold cyan"  # centered panel titles
+LABEL = "grey66"           # row labels (Claude, Last updated:, …)
+VALUE = "bold white"       # primary figures
+DIM = "grey50"             # separators, caps, reset times, trailing words
+TRACK = "grey23"           # the empty portion of a progress bar
+
+
+def _spaced(text: str) -> str:
+    """Letter-space an all-caps title (USAGE MONITOR -> U S A G E   M O N I T O R)."""
+    return " ".join(text)
 
 # Explicit view -> hotkey letter. "raw" cannot use "r" because that is bound to
 # Refresh, so it gets "a" instead. Keep this as the single source of truth for
@@ -49,11 +63,11 @@ class UsageState:
 
 
 def color_for_pct(pct: float) -> str:
-    """Green <50%, yellow 50-80%, red >80%."""
+    """Green <50%, amber 50-80%, red >80%."""
     if pct < 50:
         return "green"
     if pct <= 80:
-        return "yellow"
+        return "orange3"
     return "red"
 
 
@@ -72,18 +86,16 @@ def fmt_reset(window: LimitWindow, now: datetime | None = None) -> str:
     return f"Resets {local:%a} {hour}:{local:%M} {local:%p}"
 
 
-def _bar(pct: float, width: int = 24, color: str | None = None) -> Text:
-    """A colored progress bar like the official usage panel.
-
-    Pass ``color`` to override the severity-based fill color — used to give a
-    window a distinct hue so adjacent bars are easier to tell apart.
+def _bar(pct: float, width: int = 28, color: str | None = None) -> Text:
+    """A solid two-tone progress bar like the official usage panel: a colored
+    fill over a dark track. Pass ``color`` to override the severity-based fill.
     """
     pct = max(0.0, min(100.0, pct))
     filled = round(pct / 100 * width)
     fill = color or color_for_pct(pct)
     bar = Text()
     bar.append("█" * filled, style=fill)
-    bar.append("░" * (width - filled), style="grey37")
+    bar.append("█" * (width - filled), style=TRACK)
     return bar
 
 
@@ -98,22 +110,25 @@ def render_windows(state: UsageState) -> RenderableType:
         table = Table.grid(padding=(0, 2))
         table.add_column(justify="left", no_wrap=True)   # label
         table.add_column(justify="left")                  # bar
-        table.add_column(justify="right", no_wrap=True)   # pct
-        table.add_column(justify="right", no_wrap=True)   # reset
+        table.add_column(justify="left", no_wrap=True)    # pct
+        table.add_column(justify="left", no_wrap=True)    # reset
         for w in state.windows:
             color = color_for_pct(w.utilization)
-            # Give the 5-hour session bar a distinct fixed hue so it's easy to
-            # distinguish from the weekly bars at a glance; severity still shows
-            # in the "% used" text.
-            bar_color = "blue" if w.key == "five_hour" else None
+            pct = Text()
+            pct.append(f"{w.utilization:.0f}% ", style=f"bold {color}")
+            pct.append("used", style=DIM)
             table.add_row(
-                Text(w.label, style="bold"),
-                _bar(w.utilization, color=bar_color),
-                Text(f"{w.utilization:.0f}% used", style=color),
-                Text(fmt_reset(w), style="cyan"),
+                Text(w.label, style=f"bold {LABEL}"),
+                _bar(w.utilization),
+                pct,
+                Text(fmt_reset(w), style=DIM),
             )
         body = table
-    return Panel(body, title=f"Plan usage limits{plan}", border_style="bright_blue")
+    return Panel(
+        body,
+        title=Text(f"Plan usage limits{plan}", style=TITLE_STYLE),
+        border_style=BORDER,
+    )
 
 
 def _fmt_tokens(n: int) -> str:
@@ -124,10 +139,16 @@ def _fmt_tokens(n: int) -> str:
     return str(n)
 
 
-def _pct_text(used: float, cap: float, body: str) -> Text:
-    pct = (used / cap * 100) if cap else 0.0
-    color = color_for_pct(pct)
-    return Text(f"{body} ({pct:.0f}%)", style=color)
+def _metric_line(label: str, used_str: str, cap_str: str, used_val: float, cap: float) -> Text:
+    """A throughput row: dim label, bright value, dim cap, amber percentage.
+    The value goes dim when it's zero so live activity reads at a glance."""
+    pct = (used_val / cap * 100) if cap else 0.0
+    line = Text()
+    line.append(f"{label:<8}", style=LABEL)
+    line.append(used_str, style=VALUE if used_val else DIM)
+    line.append(f" / {cap_str} ", style=DIM)
+    line.append(f"({pct:.0f}%)", style=f"bold {color_for_pct(pct)}")
+    return line
 
 
 def _quota_for(provider: Provider, config: Config) -> int:
@@ -142,7 +163,7 @@ def _summary_line(
     label = _PROVIDER_LABEL.get(provider, provider.value.title())
     used = _fmt_tokens(summary.total_tokens)
     cap = _fmt_tokens(int(token_cap))
-    return _pct_text(summary.total_tokens, token_cap, f"{label:<8} {used} / {cap}")
+    return _metric_line(label, used, cap, summary.total_tokens, token_cap)
 
 
 def _usage_panel(
@@ -162,9 +183,13 @@ def _usage_panel(
         table.add_row(_summary_line(provider, summary, token_cap))
     table.add_row(Text(""))
     table.add_row(
-        _pct_text(total_cost, cost_cap, f"Cost     ${total_cost:.2f} / ${cost_cap:.2f}")
+        _metric_line(
+            "Cost", f"${total_cost:.2f}", f"${cost_cap:.2f}", total_cost, cost_cap
+        )
     )
-    return Panel(table, title=title, border_style="cyan")
+    return Panel(
+        table, title=Text(_spaced(title), style=TITLE_STYLE), border_style=BORDER
+    )
 
 
 def render_dashboard(state: UsageState, config: Config) -> RenderableType:
@@ -184,15 +209,23 @@ def render_dashboard(state: UsageState, config: Config) -> RenderableType:
     grid.add_row(week, hour)
     # Lead with the official plan-limit windows; the token panels are
     # supplementary context below them.
+    caption = Text()
+    caption.append("Token throughput ", style=LABEL)
+    caption.append("(from ccusage):", style=DIM)
     return Group(
         render_windows(state),
-        Text("Token throughput (from ccusage):", style="dim"),
+        caption,
         grid,
     )
 
 
 def _bucket_table(title: str, buckets: list[Bucket], cost_cap_each: float) -> Table:
-    table = Table(title=title, expand=True, border_style="cyan")
+    table = Table(
+        title=Text(title, style=TITLE_STYLE),
+        expand=True,
+        border_style=BORDER,
+        box=box.ROUNDED,
+    )
     table.add_column("Period", style="bold")
     table.add_column("Claude", justify="right")
     table.add_column("Codex", justify="right")
@@ -233,7 +266,12 @@ def render_hourly(state: UsageState, config: Config) -> RenderableType:
 
 
 def render_raw(state: UsageState, config: Config) -> RenderableType:
-    table = Table(title="RAW DATA (most recent records)", expand=True, border_style="cyan")
+    table = Table(
+        title=Text("RAW DATA (most recent records)", style=TITLE_STYLE),
+        expand=True,
+        border_style=BORDER,
+        box=box.ROUNDED,
+    )
     table.add_column("Timestamp (UTC)")
     table.add_column("Model")
     table.add_column("Input", justify="right")
@@ -258,34 +296,52 @@ def render_header(state: UsageState) -> RenderableType:
         if state.last_updated
         else "never"
     )
+    line = Text()
+    line.append("Last updated: ", style=LABEL)
+    line.append(updated, style=VALUE)
+    line.append("   |   ", style=DIM)
+    line.append("Source: ", style=LABEL)
+    line.append(state.source, style="cyan")
     return Panel(
-        Text(f"Last updated: {updated}   |   Source: {state.source}", style="bold"),
-        title="USAGE MONITOR",
-        border_style="bright_blue",
+        line,
+        title=Text(_spaced("USAGE MONITOR"), style=TITLE_STYLE),
+        border_style=BORDER,
     )
+
+
+def _append_action(nav: Text, title: str, key: str, active: bool = False) -> None:
+    """Append a nav entry, bracketing the hotkey letter in place. The active
+    view gets a filled teal pill; others show a cyan bracket on dim text."""
+    pos = title.lower().find(key)
+    if pos < 0:
+        title, pos = f"{key.upper()}{title}", 0
+    left, mid, right = title[:pos], title[pos].upper(), title[pos + 1:]
+    if active:
+        nav.append(f" {left}[{mid}]{right} ", style="bold black on cyan")
+        return
+    nav.append(f" {left}", style=DIM)
+    nav.append(f"[{mid}]", style="cyan")
+    nav.append(f"{right} ", style=DIM)
 
 
 def render_footer(state: UsageState, view: str) -> RenderableType:
     nav = Text()
     for name in VIEWS:
-        key = VIEW_KEYS[name]
-        title = name.title()
-        pos = name.find(key)  # bracket the hotkey letter in place when present
-        if pos >= 0:
-            label = f"{title[:pos]}[{key.upper()}]{title[pos + 1:]}"
-        else:
-            label = f"[{key.upper()}]{title}"
-        style = "reverse bold" if name == view else "dim"
-        nav.append(f" {label} ", style=style)
-    nav.append("  [R]efresh  [Q]uit", style="dim")
+        _append_action(nav, name.title(), VIEW_KEYS[name], active=name == view)
+    nav.append("  ")
+    _append_action(nav, "Refresh", "r")
+    _append_action(nav, "Quit", "q")
 
     if state.last_error:
         status = Text(f"⚠ {state.last_error} (showing last-known data)", style="red")
     else:
-        status = Text(
-            f"Last refresh OK. Next refresh in {state.next_refresh_in}s.", style="green"
-        )
-    return Panel(Group(nav, status), border_style="bright_blue")
+        status = Text()
+        status.append("● ", style="green")
+        status.append("Last refresh OK. ", style=LABEL)
+        status.append("Next refresh in ", style=DIM)
+        status.append(f"{state.next_refresh_in}s", style=VALUE)
+        status.append(".", style=DIM)
+    return Panel(Group(nav, status), border_style=BORDER)
 
 
 def render(state: UsageState, view: str, config: Config) -> RenderableType:

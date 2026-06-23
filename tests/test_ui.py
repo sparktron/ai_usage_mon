@@ -11,6 +11,7 @@ from usage_monitor.ui import (
     render_dashboard,
     render_footer,
     _fmt_tokens,
+    _spaced,
 )
 
 
@@ -23,8 +24,8 @@ def _render_to_text(renderable) -> str:
 def test_color_thresholds():
     assert color_for_pct(10) == "green"
     assert color_for_pct(49.9) == "green"
-    assert color_for_pct(50) == "yellow"
-    assert color_for_pct(80) == "yellow"
+    assert color_for_pct(50) == "orange3"
+    assert color_for_pct(80) == "orange3"
     assert color_for_pct(80.1) == "red"
     assert color_for_pct(150) == "red"
 
@@ -58,7 +59,7 @@ def test_render_dashboard_contains_providers():
     text = _render_to_text(render_dashboard(_state(), Config()))
     assert "Claude" in text
     assert "Codex" in text
-    assert "THIS WEEK" in text
+    assert _spaced("THIS WEEK") in text
 
 
 def test_render_all_views_do_not_crash():
@@ -66,7 +67,7 @@ def test_render_all_views_do_not_crash():
     cfg = Config()
     for view in ("dashboard", "weekly", "hourly", "raw"):
         text = _render_to_text(render(state, view, cfg))
-        assert "USAGE MONITOR" in text
+        assert _spaced("USAGE MONITOR") in text
 
 
 def test_footer_shows_error_when_present():
