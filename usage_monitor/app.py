@@ -12,6 +12,7 @@ import contextlib
 import logging
 import os
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 
 from rich.console import Console
@@ -22,7 +23,7 @@ from .api import AnthropicUsageClient, ApiError
 from .cache import Cache
 from .config import Config
 from .models import UsageRecord
-from .oauth_usage import LimitWindow, OAuthUsageError, TokenExpired
+from .oauth_usage import LimitWindow, OAuthUsageError, RateLimited, TokenExpired
 from .ui import UsageState, VIEW_KEYS, VIEWS, render
 
 log = logging.getLogger("usage_monitor.app")
@@ -55,11 +56,31 @@ class DataService:
         self.windows: list[LimitWindow] = []
         self.plan: str | None = None
         self.windows_error: str | None = None
+        # Monotonic deadline before which we skip the windows fetch entirely,
+        # so a 429 doesn't make us keep hammering a rate-limited endpoint.
+        self._windows_backoff_until: float = 0.0
+        self._windows_backoff: float = 0.0
+
+    def _ratelimit_message(self, wait: int) -> str:
+        """Rate-limit notice. Only promises last-known values when we actually
+        have some (a cold start that 429s has nothing cached to show)."""
+        if self.windows:
+            return (
+                f"Plan usage rate-limited — retrying in {wait}s "
+                "(showing last-known values)."
+            )
+        return f"Plan usage rate-limited — no data yet, retrying in {wait}s."
 
     async def _fetch_windows(self) -> None:
         """Fetch the official 5h/weekly plan-limit windows (read-only token).
         Failures are captured into windows_error, not raised, and never clear
         the last-known windows."""
+        now = time.monotonic()
+        if now < self._windows_backoff_until:
+            # Still rate-limited; keep last-known windows, don't poll.
+            wait = int(self._windows_backoff_until - now) + 1
+            self.windows_error = self._ratelimit_message(wait)
+            return
         try:
             windows = await asyncio.to_thread(
                 oauth_usage.fetch_usage, self.config.credentials_path
@@ -67,12 +88,27 @@ class DataService:
             self.windows = windows
             self.plan = oauth_usage.read_plan(self.config.credentials_path)
             self.windows_error = None
+            self._windows_backoff = 0.0
         except TokenExpired:
             self.windows_error = (
                 "Claude session token expired — run any Claude Code command to "
                 "refresh it, then this updates automatically."
             )
             log.info("oauth usage: token expired")
+        except RateLimited as exc:
+            # Exponential backoff capped at 10 minutes, floored so we never
+            # busy-retry a throttled endpoint. Retry-After is honored only when
+            # it asks us to wait *longer* than our own backoff.
+            self._windows_backoff = min(
+                max(self._windows_backoff * 2, float(self.config.refresh_interval)),
+                600.0,
+            )
+            delay = self._windows_backoff
+            if exc.retry_after is not None:
+                delay = max(delay, exc.retry_after)
+            self._windows_backoff_until = time.monotonic() + delay
+            self.windows_error = self._ratelimit_message(int(delay))
+            log.info("oauth usage rate-limited; backing off %ss", int(delay))
         except OAuthUsageError as exc:
             self.windows_error = f"Plan usage unavailable: {exc}"
             log.warning("oauth usage failed: %s", exc)
@@ -217,10 +253,18 @@ class App:
             with contextlib.suppress(Exception):
                 loop.remove_reader(sys.stdin.fileno())
 
-    async def _refresh_loop(self, live: Live) -> None:
-        await self.service.refresh()
+    def _paint(self, live: Live) -> None:
+        """Render the current state and flush it to the screen immediately.
+        ``live.update`` alone only stages the frame for the next auto-refresh
+        tick; ``refresh`` forces it out now so the very first frame can't be
+        lost to a slow startup or an early exit."""
         live.update(render(self.service.build_state(self._seconds_to_refresh),
                            self.view, self.config))
+        live.refresh()
+
+    async def _refresh_loop(self, live: Live) -> None:
+        await self.service.refresh()
+        self._paint(live)
         while self.running:
             try:
                 await asyncio.wait_for(self._refresh_event.wait(),
@@ -246,13 +290,18 @@ class App:
 
     async def run(self) -> None:
         self.cache.prune_older_than(30)
-        # Seeding touches the cache, so it must run on this (the connection's)
-        # thread. It only runs once at startup, before the live display.
-        self.service.seed_if_empty()
         with raw_terminal(), Live(
             console=self.console, screen=True, auto_refresh=True,
             refresh_per_second=4, transient=True
         ) as live:
+            # Paint an initial frame at once, before the (potentially slow)
+            # ccusage seed and the first network refresh, so the dashboard
+            # appears immediately rather than blocking on a subprocess.
+            self._paint(live)
+            # Seeding touches the cache, so it must run on this (the
+            # connection's) thread; it runs once, after the first paint.
+            self.service.seed_if_empty()
+            self._paint(live)
             tasks = [
                 asyncio.create_task(self._refresh_loop(live)),
                 asyncio.create_task(self._tick_loop(live)),

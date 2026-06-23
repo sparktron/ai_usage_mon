@@ -38,6 +38,15 @@ class TokenExpired(OAuthUsageError):
     """The on-disk access token has expired; Claude Code must refresh it."""
 
 
+class RateLimited(OAuthUsageError):
+    """The usage endpoint returned 429. ``retry_after`` is seconds to wait
+    (from the Retry-After header) or None when the server didn't say."""
+
+    def __init__(self, message: str, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 @dataclass
 class LimitWindow:
     """One usage window (e.g. the 5-hour session or the 7-day week)."""
@@ -93,6 +102,29 @@ def _coerce_pct(value: float | int | None) -> float:
     v = float(value)
     # Some payloads use a 0-1 fraction, others 0-100.
     return v * 100.0 if v <= 1.0 else v
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """Parse a Retry-After header into seconds. Supports the delta-seconds
+    form (e.g. "30") and the HTTP-date form; returns None if unparseable."""
+    if not value:
+        return None
+    value = value.strip()
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+
+        dt = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return max(0.0, (dt - datetime.now(timezone.utc)).total_seconds())
 
 
 def _parse_dt(value) -> datetime | None:
@@ -172,6 +204,11 @@ def fetch_usage(
         resp = client.get(USAGE_URL, headers=headers)
         if resp.status_code == 401:
             raise TokenExpired("usage endpoint rejected the token (401)")
+        if resp.status_code == 429:
+            raise RateLimited(
+                "rate limited by the usage endpoint (429)",
+                retry_after=_parse_retry_after(resp.headers.get("retry-after")),
+            )
         resp.raise_for_status()
         return parse_usage(resp.json())
     except httpx.HTTPError as exc:
