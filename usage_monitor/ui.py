@@ -72,13 +72,17 @@ def fmt_reset(window: LimitWindow, now: datetime | None = None) -> str:
     return f"Resets {local:%a} {hour}:{local:%M} {local:%p}"
 
 
-def _bar(pct: float, width: int = 24) -> Text:
-    """A colored progress bar like the official usage panel."""
+def _bar(pct: float, width: int = 24, color: str | None = None) -> Text:
+    """A colored progress bar like the official usage panel.
+
+    Pass ``color`` to override the severity-based fill color — used to give a
+    window a distinct hue so adjacent bars are easier to tell apart.
+    """
     pct = max(0.0, min(100.0, pct))
     filled = round(pct / 100 * width)
-    color = color_for_pct(pct)
+    fill = color or color_for_pct(pct)
     bar = Text()
-    bar.append("█" * filled, style=color)
+    bar.append("█" * filled, style=fill)
     bar.append("░" * (width - filled), style="grey37")
     return bar
 
@@ -98,9 +102,13 @@ def render_windows(state: UsageState) -> RenderableType:
         table.add_column(justify="right", no_wrap=True)   # reset
         for w in state.windows:
             color = color_for_pct(w.utilization)
+            # Give the 5-hour session bar a distinct fixed hue so it's easy to
+            # distinguish from the weekly bars at a glance; severity still shows
+            # in the "% used" text.
+            bar_color = "blue" if w.key == "five_hour" else None
             table.add_row(
                 Text(w.label, style="bold"),
-                _bar(w.utilization),
+                _bar(w.utilization, color=bar_color),
                 Text(f"{w.utilization:.0f}% used", style=color),
                 Text(fmt_reset(w), style="cyan"),
             )
