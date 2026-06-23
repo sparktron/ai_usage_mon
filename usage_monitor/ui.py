@@ -17,6 +17,11 @@ from .oauth_usage import LimitWindow
 
 VIEWS = ("dashboard", "weekly", "hourly", "raw")
 
+# Explicit view -> hotkey letter. "raw" cannot use "r" because that is bound to
+# Refresh, so it gets "a" instead. Keep this as the single source of truth for
+# both the footer labels and the key handler.
+VIEW_KEYS = {"dashboard": "d", "weekly": "w", "hourly": "h", "raw": "a"}
+
 _PROVIDER_LABEL = {
     Provider.CLAUDE: "Claude",
     Provider.CODEX: "Codex",
@@ -61,8 +66,10 @@ def fmt_reset(window: LimitWindow, now: datetime | None = None) -> str:
         h, m = divmod(secs // 60, 60)
         return f"Resets in {h}h {m:02d}m" if h else f"Resets in {m}m"
     # Show the local weekday + time, like the official panel ("Wed 5:59 PM").
+    # Avoid the glibc-only %-I directive so this renders on every platform.
     local = window.resets_at.astimezone()
-    return f"Resets {local:%a} {local:%-I:%M %p}"
+    hour = local.strftime("%I").lstrip("0") or "12"
+    return f"Resets {local:%a} {hour}:{local:%M} {local:%p}"
 
 
 def _bar(pct: float, width: int = 24) -> Text:
@@ -253,9 +260,15 @@ def render_header(state: UsageState) -> RenderableType:
 def render_footer(state: UsageState, view: str) -> RenderableType:
     nav = Text()
     for name in VIEWS:
-        key = name[0].upper()
+        key = VIEW_KEYS[name]
+        title = name.title()
+        pos = name.find(key)  # bracket the hotkey letter in place when present
+        if pos >= 0:
+            label = f"{title[:pos]}[{key.upper()}]{title[pos + 1:]}"
+        else:
+            label = f"[{key.upper()}]{title}"
         style = "reverse bold" if name == view else "dim"
-        nav.append(f" [{key}]{name[1:].title()} ", style=style)
+        nav.append(f" {label} ", style=style)
     nav.append("  [R]efresh  [Q]uit", style="dim")
 
     if state.last_error:

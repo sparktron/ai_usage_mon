@@ -40,7 +40,7 @@ class Config(BaseSettings):
     api_base_url: str = "https://api.anthropic.com"
 
     # Refresh / behaviour.
-    refresh_interval: int = Field(default=60, ge=5, le=3600)
+    refresh_interval: int = Field(default=30, ge=5, le=3600)
     use_ccusage_fallback: bool = True
     ccusage_command: str = "ccusage"
 

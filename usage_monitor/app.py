@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -22,7 +23,7 @@ from .cache import Cache
 from .config import Config
 from .models import UsageRecord
 from .oauth_usage import LimitWindow, OAuthUsageError, TokenExpired
-from .ui import UsageState, VIEWS, render
+from .ui import UsageState, VIEW_KEYS, VIEWS, render
 
 log = logging.getLogger("usage_monitor.app")
 
@@ -130,10 +131,10 @@ class DataService:
     def build_state(self, next_refresh_in: int) -> UsageState:
         now = datetime.now(timezone.utc)
         week_start = now - timedelta(days=7)
-        hour_start = now.replace(minute=0, second=0, microsecond=0)
+        hour_start = now - timedelta(hours=1)
         return UsageState(
             weekly=self.cache.summaries_between(week_start, now),
-            last_hour=self.cache.summaries_between(hour_start, now + timedelta(hours=1)),
+            last_hour=self.cache.summaries_between(hour_start, now),
             daily_buckets=self.cache.daily_buckets(7, now),
             hourly_buckets=self.cache.hourly_buckets(24, now),
             recent=self.cache.recent_records(200),
@@ -177,6 +178,7 @@ class App:
         self.running = True
         self._refresh_event = asyncio.Event()
         self._seconds_to_refresh = config.refresh_interval
+        self._view_by_key = {key: name for name, key in VIEW_KEYS.items()}
 
     def handle_key(self, key: str) -> None:
         key = key.lower()
@@ -184,29 +186,33 @@ class App:
             self.running = False
         elif key == "r":
             self._refresh_event.set()
-        elif key in ("d", "h", "w") or key in ("j", "k", "l"):
-            mapping = {"d": "dashboard", "w": "weekly", "h": "hourly"}
-            if key in mapping:
-                self.view = mapping[key]
-            else:
-                # j/k/l cycle through views
-                idx = VIEWS.index(self.view)
-                step = 1 if key in ("l", "j") else -1
-                self.view = VIEWS[(idx + step) % len(VIEWS)]
-        elif key == "\x1b":  # arrow keys send escape sequences; cycle forward
+        elif key in self._view_by_key:
+            self.view = self._view_by_key[key]
+        elif key in ("j", "k", "l"):
+            # j/k/l cycle through views
             idx = VIEWS.index(self.view)
-            self.view = VIEWS[(idx + 1) % len(VIEWS)]
+            step = 1 if key in ("l", "j") else -1
+            self.view = VIEWS[(idx + step) % len(VIEWS)]
 
     async def _input_loop(self) -> None:
         if not sys.stdin.isatty():
             return
+        fd = sys.stdin.fileno()
         loop = asyncio.get_running_loop()
-        queue: asyncio.Queue[str] = asyncio.Queue()
-        loop.add_reader(sys.stdin.fileno(), lambda: queue.put_nowait(sys.stdin.read(1)))
+        queue: asyncio.Queue[bytes] = asyncio.Queue()
+        # Read whole chunks so multi-byte escape sequences (arrow keys, mouse
+        # wheel) arrive together and can be ignored as a unit rather than having
+        # their leading 0x1b or trailing letters misread as hotkeys.
+        loop.add_reader(fd, lambda: queue.put_nowait(os.read(fd, 1024)))
         try:
             while self.running:
-                key = await queue.get()
-                self.handle_key(key)
+                chunk = await queue.get()
+                # Ignore escape sequences entirely; only literal keypresses
+                # change the view.
+                if chunk.startswith(b"\x1b"):
+                    continue
+                for byte in chunk.decode(errors="ignore"):
+                    self.handle_key(byte)
         finally:
             with contextlib.suppress(Exception):
                 loop.remove_reader(sys.stdin.fileno())

@@ -131,7 +131,10 @@ def parse_usage(payload: dict) -> list[LimitWindow]:
     def add(key: str, obj) -> None:
         if key in seen or not isinstance(obj, dict):
             return
-        if "utilization" not in obj and "resets_at" not in obj and "resetsAt" not in obj:
+        # A real usage window always reports utilization. Requiring it keeps
+        # unrelated metadata objects (that merely happen to carry a reset
+        # timestamp) from being surfaced as spurious windows.
+        if "utilization" not in obj:
             return
         seen.add(key)
         windows.append(

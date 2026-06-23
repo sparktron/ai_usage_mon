@@ -7,7 +7,7 @@ from usage_monitor.config import Config, load_config
 
 def test_defaults():
     cfg = Config()
-    assert cfg.refresh_interval == 60
+    assert cfg.refresh_interval == 30
     assert cfg.weekly_cost_cap == 100.0
     assert cfg.use_ccusage_fallback is True
 
@@ -24,22 +24,22 @@ def test_hourly_cap_explicit_override():
 
 def test_load_from_json_file(tmp_path):
     path = tmp_path / "config.json"
-    path.write_text(json.dumps({"refresh_interval": 30, "weekly_cost_cap": 250.0}))
+    path.write_text(json.dumps({"refresh_interval": 45, "weekly_cost_cap": 250.0}))
     cfg = load_config(path)
-    assert cfg.refresh_interval == 30
+    assert cfg.refresh_interval == 45
     assert cfg.weekly_cost_cap == 250.0
 
 
 def test_load_missing_file_uses_defaults(tmp_path):
     cfg = load_config(tmp_path / "nope.json")
-    assert cfg.refresh_interval == 60
+    assert cfg.refresh_interval == 30
 
 
 def test_load_invalid_json_uses_defaults(tmp_path):
     path = tmp_path / "config.json"
     path.write_text("{ not valid json")
     cfg = load_config(path)
-    assert cfg.refresh_interval == 60
+    assert cfg.refresh_interval == 30
 
 
 def test_env_key_wins_over_file(tmp_path, monkeypatch):
